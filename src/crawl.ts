@@ -8,13 +8,6 @@ export async function crawl(initialUrl: string) {
     const visited = new Set<string>();
     const result: { [code: number]: number } = {};
 
-    const agentHttp = new http.Agent({
-        keepAlive: true,
-    });
-    const agentHttps = new https.Agent({
-        keepAlive: true,
-    });
-
     const visit = async (urlObject: URL.UrlWithStringQuery) => {
         visited.add(urlObject.path || "");
 
@@ -29,16 +22,10 @@ export async function crawl(initialUrl: string) {
         switch (urlObject.protocol) {
             case undefined:
             case "http:":
-                request = http.request({
-                    ...requestOptions,
-                    // ...{ agent: agentHttp },
-                });
+                request = http.request(requestOptions);
                 break;
             case "https:":
-                request = https.request({
-                    ...requestOptions,
-                    // ...{ agent: agentHttps },
-                });
+                request = https.request(requestOptions);
                 break;
             default: throw new Error("protocol not supported");
         }
@@ -87,9 +74,6 @@ export async function crawl(initialUrl: string) {
     };
 
     await visit(initialUrlObject);
-
-    agentHttp.destroy();
-    agentHttps.destroy();
 
     return result;
 }
