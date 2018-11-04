@@ -1,4 +1,4 @@
-import * as cheerio from "cheerio";
+import * as htmlparser from "htmlparser2";
 import * as http from "http";
 import * as https from "https";
 import * as URL from "url";
@@ -7,16 +7,15 @@ export async function crawl(initialUrl: string) {
     const initialUrlObject = URL.parse(initialUrl);
     const visited = new Set<string>();
     const result: { [code: number]: number } = {};
-    const agent = new http.Agent({
+
+    const agentHttp = new http.Agent({
+        keepAlive: true,
+    });
+    const agentHttps = new https.Agent({
         keepAlive: true,
     });
 
     const visit = async (urlObject: URL.UrlWithStringQuery) => {
-        if (
-            urlObject.protocol !== "http:" &&
-            urlObject.protocol !== "https:"
-        ) return;
-
         visited.add(urlObject.path || "");
 
         const requestOptions = {
@@ -24,17 +23,22 @@ export async function crawl(initialUrl: string) {
             port: urlObject.port,
             hostname: urlObject.hostname,
             path: urlObject.path,
-            agent,
         };
 
         let request: http.ClientRequest;
         switch (urlObject.protocol) {
             case undefined:
             case "http:":
-                request = http.request(requestOptions);
+                request = http.request({
+                    ...requestOptions,
+                    // ...{ agent: agentHttp },
+                });
                 break;
             case "https:":
-                request = https.request(requestOptions);
+                request = https.request({
+                    ...requestOptions,
+                    // ...{ agent: agentHttps },
+                });
                 break;
             default: throw new Error("protocol not supported");
         }
@@ -52,31 +56,40 @@ export async function crawl(initialUrl: string) {
 
         if (!(statusCode >= 200 && statusCode < 300)) return;
 
-        const content = await new Promise<string>((resolve, reject) => {
-            let buffer = "";
-            response.
-                on("error", reject).
-                on("data", chunk => buffer += chunk).
-                on("end", () => resolve(buffer));
-        });
-
-        const $ = cheerio.load(content);
-        const linkList = $("a").toArray();
         const urlHref = URL.format(urlObject);
-        await Promise.all(
-            linkList.
-                map(({ attribs }) => URL.resolve(urlHref, attribs.href)).
-                map(linkUrlHref => URL.parse(linkUrlHref)).
-                filter(linkUrlObject => linkUrlObject.host === initialUrlObject.host).
-                filter(linkUrlObject => !visited.has(linkUrlObject.path || "")).
-                map(linkUrlObject => visit(linkUrlObject)),
-        );
+        const linkObjectList = await new Promise<URL.UrlWithStringQuery[]>(
+            (resolve, reject) => {
+                const list = new Array<URL.UrlWithStringQuery>();
+                const parser = new htmlparser.Parser({
+                    onopentag: (name, attribs) => {
+                        if (name !== "a") return;
 
+                        const linkUrlHref = URL.resolve(urlHref, attribs.href);
+                        const linkUrlObject = URL.parse(linkUrlHref);
+                        if (!(
+                            linkUrlObject.protocol === "http:" ||
+                            linkUrlObject.protocol === "https:"
+                        )) return;
+                        if (linkUrlObject.host !== initialUrlObject.host) return;
+                        if (visited.has(linkUrlObject.path || "")) return;
+
+                        list.push(linkUrlObject);
+                    },
+                });
+                response.
+                    on("error", reject).
+                    on("data", chunk => parser.write(String(chunk))).
+                    on("end", () => resolve(list));
+            });
+        await Promise.all(
+            linkObjectList.map(visit),
+        );
     };
 
     await visit(initialUrlObject);
 
-    agent.destroy();
+    agentHttp.destroy();
+    agentHttps.destroy();
 
     return result;
 }
