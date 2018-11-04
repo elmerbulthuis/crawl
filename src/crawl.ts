@@ -1,46 +1,82 @@
-import * as fetch from "isomorphic-fetch";
-import { JSDOM } from "jsdom";
+import * as cheerio from "cheerio";
+import * as http from "http";
+import * as https from "https";
 import * as URL from "url";
 
 export async function crawl(initialUrl: string) {
     const initialUrlObject = URL.parse(initialUrl);
     const visited = new Set<string>();
     const result: { [code: number]: number } = {};
+    const agent = new http.Agent({
+        keepAlive: true,
+    });
 
-    const visit = async (url: string) => {
-        const urlObject = URL.parse(url);
-        if (urlObject.host !== initialUrlObject.host) return;
-
+    const visit = async (urlObject: URL.UrlWithStringQuery) => {
         if (
             urlObject.protocol !== "http:" &&
             urlObject.protocol !== "https:"
         ) return;
 
-        const path = urlObject.path || "";
-        if (visited.has(path)) return;
+        visited.add(urlObject.path || "");
 
-        visited.add(path);
+        const requestOptions = {
+            method: "GET",
+            port: urlObject.port,
+            hostname: urlObject.hostname,
+            path: urlObject.path,
+            agent,
+        };
 
-        // tslint:disable-next-line:no-console
-        // console.log(url);
+        let request: http.ClientRequest;
+        switch (urlObject.protocol) {
+            case undefined:
+            case "http:":
+                request = http.request(requestOptions);
+                break;
+            case "https:":
+                request = https.request(requestOptions);
+                break;
+            default: throw new Error("protocol not supported");
+        }
 
-        const res = await fetch(url);
-        if (res.status in result) result[res.status]++;
-        else result[res.status] = 1;
+        const response = await new Promise<http.IncomingMessage>(
+            (resolve, reject) => request.
+                on("error", reject).
+                on("response", resolve).
+                end(),
+        );
 
-        if (!res.ok) return;
+        const statusCode = response.statusCode || 0;
+        if (statusCode in result) result[statusCode]++;
+        else result[statusCode] = 1;
 
-        const content = await res.text();
-        const dom = new JSDOM(content);
+        if (!(statusCode >= 200 && statusCode < 300)) return;
 
-        const linkList = Array.from(dom.window.document.links);
+        const content = await new Promise<string>((resolve, reject) => {
+            let buffer = "";
+            response.
+                on("error", reject).
+                on("data", chunk => buffer += chunk).
+                on("end", () => resolve(buffer));
+        });
+
+        const $ = cheerio.load(content);
+        const linkList = $("a").toArray();
+        const urlHref = URL.format(urlObject);
         await Promise.all(
             linkList.
-                map(link => visit(URL.resolve(url, link.href))),
+                map(({ attribs }) => URL.resolve(urlHref, attribs.href)).
+                map(linkUrlHref => URL.parse(linkUrlHref)).
+                filter(linkUrlObject => linkUrlObject.host === initialUrlObject.host).
+                filter(linkUrlObject => !visited.has(linkUrlObject.path || "")).
+                map(linkUrlObject => visit(linkUrlObject)),
         );
+
     };
 
-    await visit(initialUrl);
+    await visit(initialUrlObject);
+
+    agent.destroy();
 
     return result;
 }
